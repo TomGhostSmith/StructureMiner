@@ -10,8 +10,10 @@ import datetime
 from tqdm import tqdm
 import pickle
 
-import IOUtils
+import pynvml  # monitor for NVIDIA GPU. Modify batch size if GRAM is sufficient
+pynvml.nvmlInit()
 
+import IOUtils
 
 
 class StructureMiner(torch.nn.Module):
@@ -25,6 +27,13 @@ class StructureMiner(torch.nn.Module):
         self.validationStep = args['validationStep'] if ('validationStep' in args) else 100
         self.checkpointStep = args['checkpointStep'] if ('checkpointStep' in args) else 1000
         self.device = args['device'] if ('device' in args) else torch.device('cuda:0')
+        self.attentionDevices = args['attentionDevices'] if ('attentionDevices' in args) else [self.device]
+        self.autoBatch = args['autoBatch'] if ('autoBatch' in args) else False
+        self.handle = pynvml.nvmlDeviceGetHandleByIndex(self.device.index)
+
+        if (self.autoBatch):
+            self.batchSize = 1
+            self.attentionDevices = [self.device]
 
         self.embedder = Embedder(self.device)
         self.siameseNetwork = SiameseNetwork(self.device)
@@ -46,6 +55,14 @@ class StructureMiner(torch.nn.Module):
         self.checkpointStep = args['checkpointStep'] if ('checkpointStep' in args) else 1000
         self.device = args['device'] if ('device' in args) else torch.device('cuda:0')
         self.iter = args['originIter'] if ('originIter' in args) else 0
+        self.attentionDevices = args['attentionDevices'] if ('attentionDevices' in args) else [self.device]
+        self.autoBatch = args['autoBatch'] if ('autoBatch' in args) else False
+        self.handle = pynvml.nvmlDeviceGetHandleByIndex(self.device.index)
+
+        if (self.autoBatch):
+            self.batchSize = 1
+            self.attentionDevices = [self.device]
+
         self.embedder.to(self.device)
         self.siameseNetwork.to(self.device)
         self.classifier.to(self.device)
@@ -71,32 +88,74 @@ class StructureMiner(torch.nn.Module):
             length = min(self.iterCount - self.iter, self.validationStep)
             random.shuffle(trainset)
             totalLoss = 0
+
+            batchLoss = 0
+
+            currentBatchSize = 0
+
             for x, y in trainset[:length]:
-                # torch.cuda.set_device(1)
-                # torch.cuda.empty_cache()
-                # torch.cuda.set_device(0)
-                # torch.cuda.empty_cache()
                 geneName, refSeq, altSeq, startPos = x
-                refEmbedding = self.embedder.forward(refSeq, geneName, startPos)
-                altEmbedding = self.embedder.forward(altSeq, geneName, startPos)
+                # IOUtils.showInfo('-- Get Embedding --')
+                attentionDevice = self.attentionDevices[self.iter % self.batchSize]
+                refEmbedding = self.embedder.forward(refSeq, geneName, startPos, attentionDevice)
+                altEmbedding = self.embedder.forward(altSeq, geneName, startPos, attentionDevice)
+                # IOUtils.showInfo('-- Siamese Network --')
                 embedding = self.siameseNetwork.forward(refEmbedding, altEmbedding)
+                # IOUtils.showInfo('-- Classifier --')
                 result = self.classifier.forward(embedding)
                 diff = torch.abs(result - y)
                 # resultClz = 0 if result < 0.5 else 1
+                # IOUtils.showInfo('-- Get Loss --')
                 loss = self.classifier.getLoss(y)
-                self.optimizer.zero_grad()
+                # IOUtils.showInfo('-- Backward --')
 
+                batchLoss += loss
                 
-                loss.backward()
-                self.optimizer.step()
-                progressTrain.update(1)
+                # loss.backward()
+                # self.optimizer.step()
+                # IOUtils.showInfo('-- End iter --')
                 self.iter += 1
-                logs = {"loss": loss.detach().item(), "diff": diff.detach().item()}
-                # logs = {"loss": loss.detach().item(), "pred": result.item(), "target": y.item()}
+                currentBatchSize += 1
+
+                # totalLoss += loss.item()
+            
+                # backward after a batch
+                normalBatch = (not self.autoBatch) and self.iter % self.batchSize == 0
+                autoBatch = self.autoBatch
+                if (autoBatch):
+                    pass
+                    # IOUtils.showInfo(f"{memory} MB is free")
+                    memory = int(pynvml.nvmlDeviceGetMemoryInfo(self.handle).free/1048576)
+                    autoBatch = (memory < 10000)
+                    logs = {"loss": loss.detach().item(), "diff": diff.detach().item(), 'mem': memory, 'bs': currentBatchSize}
+                else:
+                    logs = {"loss": loss.detach().item(), "diff": diff.detach().item()}
+
+                progressTrain.update(1)
                 progressTrain.set_postfix(**logs)
-                totalLoss += loss.item()
+
+                if (normalBatch or autoBatch):
+                    self.optimizer.zero_grad()
+                    batchLoss.backward()
+                    self.optimizer.step()
+                    totalLoss += batchLoss.detach().item()
+                    batchLoss = 0
+                    currentBatchSize = 0
+
+                    if (autoBatch):
+                        torch.cuda.empty_cache()
+
+
             
             progressTrain.close()
+
+            if (batchLoss != 0):  # do batch backward for non-complete batch
+                self.optimizer.zero_grad()
+                batchLoss.backward()
+                self.optimizer.step()
+                totalLoss += batchLoss.detach().item()
+                batchLoss = 0
+                currentBatchSize = 0
 
             if (self.iter % self.validationStep == 0):
                 accuracy = 0
@@ -117,14 +176,17 @@ class StructureMiner(torch.nn.Module):
                 #     IOUtils.showInfo(f'{name}: {preY.item()}, {y.item()}, abs={abs(preY - y).item()}')
             
             if (self.iter % self.checkpointStep == 0):
+                h = self.handle
+                self.handle = None
                 with open(f"{logPath}/checkpoint_{self.iter}.pkl", 'wb') as fp:
                     pickle.dump(self, fp)
-            
+                self.handle = h
+
     def predict(self, x):
         with torch.no_grad():
             geneName, refSeq, altSeq, startPos = x
-            refEmbedding = self.embedder.forward(refSeq, geneName, startPos)
-            altEmbedding = self.embedder.forward(altSeq, geneName, startPos)
+            refEmbedding = self.embedder.forward(refSeq, geneName, startPos, self.device)
+            altEmbedding = self.embedder.forward(altSeq, geneName, startPos, self.device)
             embedding = self.siameseNetwork.forward(refEmbedding, altEmbedding)
             result = self.classifier.forward(embedding)
             # resultClz = 0 if result < 0.5 else 1

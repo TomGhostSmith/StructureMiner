@@ -6,6 +6,7 @@ class Config():
         self.comparativeEmbedding = 32
         # self.trainsetPath = '/Data/1000GenomesData/variant_summary-missense.csv'
         self.trainsetPath = '/Data/1000GenomesData/variant_summary.csv'
+        # self.trainsetPath = '/Data/1000GenomesData/GRAMtest.csv'
         self.logPath = './log'
 
 config = Config()

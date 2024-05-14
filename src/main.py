@@ -78,14 +78,23 @@ def test(modelPath):
     structureMiner.test(validationset)
 
 def train(modelPath=None):
+    IOUtils.showInfo('Start train')
     device = torch.device('cuda:1')
     trainset, validationset = getTrainset(device, 5000, 250)
     # pathoCount = sum([t[1] for t in validationset]).item()
     # IOUtils.showInfo(f"patho = {pathoCount}, benign = {len(validationset) - pathoCount}")
     args = {
-        "lr": 1e-5,
-        "iter": 15000,
+        "lr": 1e-4,
+        "iter": 30000,
         "validationStep": 300,
+        # "batch": 1,
+        "autoBatch": True,
+        # "attentionDevices": [torch.device('cuda:1'), torch.device('cuda:1')],
+        # "attentionDevices": [torch.device('cuda:0'), torch.device('cuda:1'), torch.device('cuda:1')],
+        # "batch": 4,
+        # "attentionDevices": [torch.device('cuda:0'), torch.device('cuda:1'), torch.device('cuda:1'), torch.device('cuda:1')],
+        # "attentionDevices": [torch.device('cuda:0'), torch.device('cuda:1'), torch.device('cuda:1'), torch.device('cuda:1'), torch.device('cuda:1')],
+        # "attentionDevices": [torch.device('cuda:0'), torch.device('cuda:1'), torch.device('cuda:1'), torch.device('cuda:1'), torch.device('cuda:1'), torch.device('cuda:1'), torch.device('cuda:1')],
         "checkpointStep": 1500,
         "device": device
     }
@@ -100,7 +109,7 @@ def train(modelPath=None):
 
 def main():
     # train()
-    train("./log/05130154/checkpoint_7500.pkl")
+    train("./log/05132340/checkpoint_22500.pkl")
     # test("./log/202405130109/checkpoint_30.pkl")
 
 

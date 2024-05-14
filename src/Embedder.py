@@ -36,20 +36,29 @@ class Embedder(torch.nn.Module):
         self.fe = pipeline('feature-extraction', model=self.model, tokenizer=self.tokenizer,device=device)
         self.device = device
 
-    def forward(self, sequence, geneName, pos):
+    def forward(self, sequence, geneName, pos, attentionScoreDevice):
         # get origin embedding
+        # IOUtils.showInfo('start BERT')
         tokenizedSequence = ' '.join(list(sequence))
         originEmbedding = torch.tensor(self.fe(tokenizedSequence)[0][1:-1], device=self.device)
 
-        seqLength = len(sequence)
+        # if (isinstance(sequence, list)):  # this will no longer support batch
+        #     raise Exception()
 
-        queries = self.query(originEmbedding)
-        keys = self.key(originEmbedding)
-        values = self.value(originEmbedding)
+        seqLength = len(sequence)
+        # seqLength = torch.tensor([len(seq) for seq in sequence])
+        # IOUtils.showInfo('prepare Attention')
+
+        queries = self.query(originEmbedding).to(attentionScoreDevice)
+        keys = self.key(originEmbedding).to(attentionScoreDevice)
+        values = self.value(originEmbedding).to(attentionScoreDevice)
 
         queries = queries.view(seqLength, config.headCount, self.headDimension).transpose(0, 1)
         keys = keys.view(seqLength, config.headCount, self.headDimension).transpose(0, 1)
         values = values.view(seqLength, config.headCount, self.headDimension).transpose(0, 1)
+
+
+        # IOUtils.showInfo('get divider')
 
         # get divider
         # originally, dividers begins with 0
@@ -58,10 +67,10 @@ class Embedder(torch.nn.Module):
         if (structure != None):
             dividers:list = structure['divider']
             dividers.insert(0, 0)
-            if (dividers[-1] != len(sequence)):
-                dividers.append(len(sequence))
+            if (dividers[-1] != seqLength):
+                dividers.append(seqLength)
         else:
-            dividers = [0, len(sequence)]
+            dividers = [0, seqLength]
         
         ranges = list()
         for begin, end in zip(dividers[:-1], dividers[1:]):
@@ -72,9 +81,11 @@ class Embedder(torch.nn.Module):
                     ranges += [range(begin, seqLength)] * (seqLength - begin)
 
             
+        # IOUtils.showInfo('start Attention')
 
         # init attention score
-        attentionScore = torch.zeros((config.headCount, seqLength, seqLength), device = originEmbedding.device)
+        # attentionScore = torch.zeros((config.headCount, seqLength, seqLength), device = originEmbedding.device)
+        attentionScore = torch.zeros((config.headCount, seqLength, seqLength), device = attentionScoreDevice)
         for head in range(config.headCount):
             for idx in range(seqLength):
                 contextRange = ranges[idx]
@@ -87,16 +98,21 @@ class Embedder(torch.nn.Module):
                 except:
                     IOUtils.showInfo(f'gene={geneName}, head={head}, idx={idx}, contextRange={contextRange}, scoreShape={attentionScore.shape}', 'ERROR')
 
+        # IOUtils.showInfo('sum Attention')
+
 
         attentionWeights = torch.softmax(attentionScore, dim=-1)
         weightedValues = torch.matmul(attentionWeights, values)
-        weightedValues = weightedValues.transpose(0, 1).contiguous().view(seqLength, config.embeddingSize)
+        weightedValues = weightedValues.transpose(0, 1).contiguous().view(seqLength, config.embeddingSize).to(self.device)
+
         result = self.outLinear(weightedValues)
 
         mainContext = ranges[pos]
 
+
         # TODO: use protein embedding, or secondary structure embedding?
         result = torch.mean(result[mainContext], dim=0)
+        # IOUtils.showInfo('end Attention')
         return result
 
 
